@@ -1,0 +1,243 @@
+name: PR Automation Workflow
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    name: code-quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        id: eslint
+        run: |
+          echo "eslint_result<<EOF" >> $GITHUB_OUTPUT
+          npm run lint 2>&1 || echo "ESLint check failed"
+          echo "EOF" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Run Prettier check
+        id: prettier
+        run: |
+          echo "prettier_result<<EOF" >> $GITHUB_OUTPUT
+          npx prettier --check . 2>&1 || echo "Prettier check failed"
+          echo "EOF" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eslintResult = `${{ steps.eslint.outputs.eslint_result }}`;
+            const prettierResult = `${{ steps.prettier.outputs.prettier_result }}`;
+            const comment = `
+            ## Code Quality Report
+            ### ESLint Results:
+            \`\`\`
+            ${eslintResult.trim() || 'No ESLint output'}
+            \`\`\`
+            ### Prettier Results:
+            \`\`\`
+            ${prettierResult.trim() || 'No Prettier output'}
+            \`\`\`
+            `;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  testing-suite:
+    name: testing-suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run test suite with coverage
+        id: test
+        run: |
+          echo "test_result<<EOF" >> $GITHUB_OUTPUT
+          npm test -- --coverage 2>&1 || echo "Test suite failed"
+          echo "EOF" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const testResult = `${{ steps.test.outputs.test_result }}`;
+            const comment = `
+            ## Test Coverage Report
+            \`\`\`
+            ${testResult.trim() || 'No test coverage output'}
+            \`\`\`
+            `;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: warn
+
+  security-scan:
+    name: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run dependency vulnerability check (npm audit)
+        id: npm-audit
+        run: |
+          echo "audit_result<<EOF" >> $GITHUB_OUTPUT
+          npm audit 2>&1 || echo "npm audit check failed"
+          echo "EOF" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Scan for secrets in code changes
+        id: secret-scan
+        run: |
+          echo "secret_result<<EOF" >> $GITHUB_OUTPUT
+          # Scan for common secret patterns in PR changes
+          git diff origin/${{ github.base_ref }}...origin/${{ github.head_ref }} | grep -E '(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|ACCESS_TOKEN)' -i || echo "No secrets detected in changes"
+          echo "EOF" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const auditResult = `${{ steps.npm-audit.outputs.audit_result }}`;
+            const secretResult = `${{ steps.secret-scan.outputs.secret_result }}`;
+            const comment = `
+            ## Security Scan Report
+            ### Dependencies Vulnerabilities:
+            \`\`\`
+            ${auditResult.trim() || 'No vulnerability results'}
+            \`\`\`
+            ### Secrets Scan Results:
+            \`\`\`
+            ${secretResult.trim() || 'No secrets found'}
+            \`\`\`
+            `;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+  build-validation:
+    name: build-validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application
+        id: build
+        run: |
+          echo "build_result<<EOF" >> $GITHUB_OUTPUT
+          npm run build 2>&1 || echo "Build failed"
+          echo "EOF" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Validate endpoints (example)
+        id: endpoint-check
+        run: |
+          echo "endpoint_result<<EOF" >> $GITHUB_OUTPUT
+          # Check if build directory exists
+          if [ -d "dist" ] || [ -d "build" ]; then
+            # Start server (adjust command based on project)
+            npm start &
+            sleep 5
+            # Test root endpoint
+            curl -s http://localhost:3000 || echo "Endpoint check failed: Server unreachable"
+            # Clean up
+            pkill -f "npm start" 2>/dev/null || true
+          else
+            echo "Build directory not found - skipping endpoint validation"
+          fi
+          echo "EOF" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Upload deployment preview artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: |
+            dist/
+            build/
+          if-no-files-found: warn
+
+      - name: Post Build Validation Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const buildResult = `${{ steps.build.outputs.build_result }}`;
+            const endpointResult = `${{ steps.endpoint-check.outputs.endpoint_result }}`;
+            const comment = `
+            ## Build Validation
+            ### Build Results:
+            \`\`\`
+            ${buildResult.trim() || 'No build output'}
+            \`\`\`
+            ### Endpoint Validation Results:
+            \`\`\`
+            ${endpointResult.trim() || 'No endpoint validation performed'}
+            \`\`\`
+            `;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
